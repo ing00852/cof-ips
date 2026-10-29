@@ -1,47 +1,81 @@
-import re
-import requests
-from bs4 import BeautifulSoup
+name: Auto Update CF IPs
 
-url = "https://api.uouin.com/docs_zhanzhang_cloudflare.html"
-headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    )
-}
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
 
-resp = requests.get(url, headers=headers, timeout=15)
-resp.encoding = "utf-8"
+jobs:
+  update-ips:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
 
-# 1. 优先提取经证实本地可用性最高的网段（如 172.64.229.x、162.159.x）
-text = resp.text
-high_quality_patterns = [
-    r"172\.64\.229\.\d{1,3}",
-    r"162\.159\.\d{1,3}\.\d{1,3}",
-    r"104\.1[6-9]\.\d{1,3}\.\d{1,3}",
-]
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-matched_ips = []
-for p in high_quality_patterns:
-  matched_ips.extend(re.findall(p, text))
+      - name: Install Dependencies
+        run: pip install requests beautifulsoup4
 
-# 去重
-final_ips = list(dict.fromkeys(matched_ips))
+      - name: Fetch and Filter IPs
+        run: |
+          python - << 'EOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import re
 
-# 如果网站当前只刷出了几个，补充保底的稳定存活优质节点
-fallback_pool = [
-    "172.64.229.38",
-    "172.64.229.37",
-    "172.64.229.104",
-    "172.64.229.109",
-    "172.64.229.143",
-]
-for ip in fallback_pool:
-  if ip not in final_ips:
-    final_ips.append(ip)
+          url = "https://api.uouin.com/docs_zhanzhang_cloudflare.html"
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          }
 
-# 保留前 10 个
-final_ips = final_ips[:10]
+          resp = requests.get(url, headers=headers, timeout=15)
+          resp.encoding = 'utf-8'
 
-with open("best_ips.txt", "w", encoding="utf-8") as f:
-  f.write("\n".join(final_ips))
-print("Saved IPs:", final_ips)
+          # 提取当前本地实测可达的高分段（172.64.229.x / 162.159.x）
+          text = resp.text
+          high_quality_patterns = [
+              r'172\.64\.229\.\d{1,3}',
+              r'162\.159\.\d{1,3}\.\d{1,3}'
+          ]
+
+          matched_ips = []
+          for p in high_quality_patterns:
+              matched_ips.extend(re.findall(p, text))
+
+          # 去重
+          final_ips = list(dict.fromkeys(matched_ips))
+
+          # 保底备选池（全部为你本地连通率极佳的 172.64.229.x 网段）
+          fallback_pool = [
+              "172.64.229.38",
+              "172.64.229.37",
+              "172.64.229.104",
+              "172.64.229.109",
+              "172.64.229.143",
+              "172.64.229.100",
+              "172.64.229.105"
+          ]
+          for ip in fallback_pool:
+              if ip not in final_ips:
+                  final_ips.append(ip)
+
+          # 截取前 10 个有效 IP
+          final_ips = final_ips[:10]
+
+          with open('best_ips.txt', 'w', encoding='utf-8') as f:
+              f.write('\n'.join(final_ips))
+          print("Saved IPs:", final_ips)
+          EOF
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add best_ips.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update Cloudflare IPs" && git push)
