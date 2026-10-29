@@ -1,0 +1,78 @@
+name: Auto Update CF IPs
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # 每 2 小时自动执行一次
+  workflow_dispatch:        # 支持手动随时点击触发运行
+
+jobs:
+  update-ips:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Fetch and Filter IPs
+        run: |
+          python - << 'EOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import re
+
+          url = "https://api.uouin.com/docs_zhanzhang_cloudflare.html"
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          }
+
+          resp = requests.get(url, headers=headers, timeout=15)
+          resp.encoding = 'utf-8'
+
+          # 提取丢包 0.00% 且按速度排序的优选 IP
+          soup = BeautifulSoup(resp.text, 'html.parser')
+          tables = soup.find_all('table')
+          selected_ips = []
+
+          if tables:
+              rows = tables[0].find_all('tr')[1:]
+              for row in rows:
+                  cols = [td.get_text(strip=True) for td in row.find_all(['td', 'th'])]
+                  if len(cols) >= 6:
+                      ip = cols[2]
+                      packet_loss = cols[3]
+                      speed_str = cols[5]
+                      # 必须符合合法 IP 且丢包为 0%
+                      if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip) and '0' in packet_loss.split('.')[0]:
+                          speed_val = float(re.search(r'([\d\.]+)', speed_str).group(1)) if re.search(r'([\d\.]+)', speed_str) else 0.0
+                          selected_ips.append((ip, speed_val))
+
+          # 按测速从大到小排序，取前 10 个
+          selected_ips.sort(key=lambda x: x[1], reverse=True)
+          final_ips = [item[0] for item in selected_ips[:10]]
+
+          # 如果表格没读到，兜底正则提取页面展示的所有 CF IP
+          if not final_ips:
+              pattern = r'172\.(?:64|67)\.\d{1,3}\.\d{1,3}|162\.159\.\d{1,3}\.\d{1,3}'
+              found = list(dict.fromkeys(re.findall(pattern, resp.text)))
+              final_ips = found[:10]
+
+          with open('best_ips.txt', 'w', encoding='utf-8') as f:
+              f.write('\n'.join(final_ips))
+          print("Saved IPs:", final_ips)
+          EOF
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add best_ips.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update Cloudflare IPs" && git push)
